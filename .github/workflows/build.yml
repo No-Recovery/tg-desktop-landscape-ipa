@@ -1,0 +1,80 @@
+name: build-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'changes/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 350
+    steps:
+      - name: Checkout build repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Telegram iOS 13.1.2
+        uses: actions/checkout@v4
+        with:
+          repository: TelegramMessenger/Telegram-iOS
+          ref: release-13.1.2
+          path: telegram-ios
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Apply desktop-landscape mod
+        run: |
+          set -eux
+          cp -R changes/submodules/. telegram-ios/submodules/
+          test -f telegram-ios/submodules/ChatListUI/Sources/ChatListFolderRailView.swift
+          test -f telegram-ios/submodules/Display/Source/InAppKeyboard.swift
+          # Keep the build within the 3 vCPU / 7 GB standard runner.
+          printf '\nbuild --jobs=2\nbuild --local_ram_resources=4096\n' >> telegram-ios/.bazelrc
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcode-select -p
+          df -h /
+          sysctl -n hw.ncpu
+          sysctl -n hw.memsize
+
+      - name: Build IPA
+        working-directory: telegram-ios
+        env:
+          BUILD_NUMBER: 100001
+        run: |
+          set -eux
+          mkdir -p build/artifacts
+          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
+          python3 -u build-system/Make/Make.py \
+            --bazelUserRoot="$RUNNER_TEMP/bazel-root" \
+            build \
+            --configurationPath=build-system/appstore-configuration.json \
+            --codesigningInformationPath=build-system/fake-codesigning \
+            --configuration=release_arm64 \
+            --buildNumber="$BUILD_NUMBER" \
+            --outputBuildArtifactsPath="$PWD/build/artifacts"
+
+      - name: Collect IPA
+        working-directory: telegram-ios
+        run: |
+          set -eux
+          IPA=$(find bazel-out -type f -name 'Telegram.ipa' | head -n 1)
+          test -n "$IPA"
+          cp "$IPA" build/artifacts/Telegram.ipa
+          ls -lh build/artifacts/Telegram.ipa
+          shasum -a 256 build/artifacts/Telegram.ipa
+          unzip -l build/artifacts/Telegram.ipa | head -n 20
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Telegram-13.1.2-desktop-landscape
+          path: telegram-ios/build/artifacts/Telegram.ipa
+          if-no-files-found: error
+          retention-days: 14

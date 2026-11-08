@@ -1,0 +1,1613 @@
+diff --git a/submodules/ChatListUI/Sources/ChatListController.swift b/submodules/ChatListUI/Sources/ChatListController.swift
+index 5bdff8a..70b3558 100644
+--- a/submodules/ChatListUI/Sources/ChatListController.swift
++++ b/submodules/ChatListUI/Sources/ChatListController.swift
+@@ -2885,6 +2885,8 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController
+     }
+     
+     func updateHeaderContent() -> (primaryContent: ChatListHeaderComponent.Content?, secondaryContent: ChatListHeaderComponent.Content?) {
++        // Desktop-style layout: the header buttons (Edit, +, compose) are hidden to keep the narrow list clean.
++        let hidesHeaderButtons = self.chatListDisplayNode.isFolderRailActive && !self.chatListDisplayNode.isEditing
+         var primaryContent: ChatListHeaderComponent.Content?
+         if let primaryContext = self.primaryContext {
+             var displayBackButton: Bool = false
+@@ -2895,8 +2897,8 @@ public class ChatListControllerImpl: TelegramBaseController, ChatListController
+                 title: self.plainTitle,
+                 titleComponent: primaryContext.chatTitleComponent.flatMap { AnyComponent<Empty>($0) },
+                 chatListTitle: primaryContext.chatListTitle,
+-                leftButton: primaryContext.leftButton,
+-                rightButtons: primaryContext.rightButtons,
++                leftButton: hidesHeaderButtons ? nil : primaryContext.leftButton,
++                rightButtons: hidesHeaderButtons ? [] : primaryContext.rightButtons,
+                 backPressed: displayBackButton ? { [weak self] in
+                     guard let self else {
+                         return
+diff --git a/submodules/ChatListUI/Sources/ChatListControllerNode.swift b/submodules/ChatListUI/Sources/ChatListControllerNode.swift
+index 594f370..99bc4e0 100644
+--- a/submodules/ChatListUI/Sources/ChatListControllerNode.swift
++++ b/submodules/ChatListUI/Sources/ChatListControllerNode.swift
+@@ -1154,6 +1154,7 @@ public final class ChatListContainerNode: ASDisplayNode, ASGestureRecognizerDele
+ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
+     private let context: AccountContext
+     private let location: ChatListControllerLocation
++    private var folderRailView: ChatListFolderRailView?
+     private var presentationData: PresentationData
+     private let animationCache: AnimationCache
+     private let animationRenderer: MultiAnimationRenderer
+@@ -1441,7 +1442,129 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
+         self.searchDisplayController?.updatePresentationData(presentationData)
+     }
+     
++    /// Desktop-style layout: on an iPhone in landscape (wide split layout) the folders are shown as a vertical
++    /// column to the left of the chat list instead of the horizontal tabs. Returns 0 when the column is not shown.
++    private func folderRailWidth(layout: ContainerViewLayout) -> CGFloat {
++        guard UIDevice.current.userInterfaceIdiom == .phone, case .regular = layout.metrics.widthClass else {
++            return 0.0
++        }
++        guard let controller = self.controller, !controller.previewing, self.location == .chatList(groupId: .root) else {
++            return 0.0
++        }
++        guard controller.hasTabs else {
++            return 0.0
++        }
++        return ChatListFolderRailView.railWidth
++    }
++    
++    /// True while the desktop-style folder column is shown (iPhone in landscape).
++    var isFolderRailActive: Bool {
++        guard let layout = self.containerLayout?.layout else {
++            return false
++        }
++        return self.folderRailWidth(layout: layout) > 0.0
++    }
++    
++    private func handleFolderRailSelection(id: ChatListFilterTabEntryId) {
++        guard let tabContainerData = self.controller?.tabContainerData else {
++            return
++        }
++        var folderIndex: Int?
++        var index = 0
++        for entry in tabContainerData.0 {
++            if case .filter = entry {
++                if entry.id == id {
++                    folderIndex = index
++                }
++                index += 1
++            }
++        }
++        var isDisabled = false
++        if let filtersLimit = tabContainerData.2, let folderIndex {
++            isDisabled = !self.context.isPremium && folderIndex >= filtersLimit
++        }
++        if isDisabled {
++            let filtersCount = tabContainerData.0.count(where: { item in
++                if case .all = item {
++                    return false
++                } else {
++                    return true
++                }
++            })
++            let context = self.context
++            var replaceImpl: ((ViewController) -> Void)?
++            let controller = PremiumLimitScreen(context: context, subject: .folders, count: Int32(filtersCount), action: {
++                let controller = PremiumIntroScreen(context: context, source: .folders)
++                replaceImpl?(controller)
++                return true
++            })
++            replaceImpl = { [weak controller] c in
++                controller?.replace(with: c)
++            }
++            self.controller?.push(controller)
++        } else {
++            self.controller?.selectTab(id: id)
++        }
++    }
++    
++    /// `layout` is the layout already adjusted by `containerLayoutUpdated` (its left safe inset includes the column).
++    private func updateFolderRail(layout: ContainerViewLayout, transition: ComponentTransition) {
++        let railWidth = self.folderRailWidth(layout: layout)
++        guard railWidth > 0.0, let tabContainerData = self.controller?.tabContainerData else {
++            if let folderRailView = self.folderRailView {
++                self.folderRailView = nil
++                folderRailView.removeFromSuperview()
++            }
++            return
++        }
++        
++        let folderRailView: ChatListFolderRailView
++        if let current = self.folderRailView {
++            folderRailView = current
++        } else {
++            folderRailView = ChatListFolderRailView()
++            folderRailView.tabSelected = { [weak self] id in
++                self?.handleFolderRailSelection(id: id)
++            }
++            folderRailView.editPressed = { [weak self] in
++                guard let self, let controller = self.controller else {
++                    return
++                }
++                controller.push(chatListFilterPresetListController(context: self.context, mode: .default))
++            }
++            self.folderRailView = folderRailView
++        }
++        if folderRailView.superview !== self.view {
++            self.view.addSubview(folderRailView)
++        } else {
++            self.view.bringSubviewToFront(folderRailView)
++        }
++        
++        let originalLeftInset = max(0.0, layout.safeInsets.left - railWidth)
++        let items: [ChatListFolderRailView.Item] = tabContainerData.0.map { entry in
++            switch entry {
++            case let .all(unreadCount):
++                return ChatListFolderRailView.Item(id: .all, title: self.presentationData.strings.ChatList_Tabs_All, badgeValue: unreadCount, badgeIsAccent: true)
++            case let .filter(id, text, unread):
++                return ChatListFolderRailView.Item(id: .filter(id), title: text.text, badgeValue: unread.value, badgeIsAccent: unread.hasUnmuted)
++            }
++        }
++        let size = CGSize(width: originalLeftInset + railWidth, height: layout.size.height)
++        transition.setFrame(view: folderRailView, frame: CGRect(origin: CGPoint(), size: size))
++        folderRailView.update(
++            theme: self.presentationData.theme,
++            strings: self.presentationData.strings,
++            items: items,
++            selectedId: self.mainContainerNode.currentItemFilter,
++            size: size,
++            leftInset: originalLeftInset,
++            topInset: max(layout.statusBarHeight ?? 0.0, layout.safeInsets.top) + 8.0,
++            bottomInset: max(layout.intrinsicInsets.bottom, 8.0)
++        )
++    }
++    
+     private func updateNavigationBar(layout: ContainerViewLayout, deferScrollApplication: Bool, transition: ComponentTransition) -> (navigationHeight: CGFloat, storiesInset: CGFloat) {
++        self.updateFolderRail(layout: layout, transition: transition)
+         let headerContent = self.controller?.updateHeaderContent()
+         
+         var panels: [HeaderPanelContainerComponent.Panel] = []
+@@ -1547,7 +1670,7 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
+         var navigationHeaderPanels: AnyComponent<Empty>?
+         if self.controller?.tabContainerData != nil || !panels.isEmpty {
+             var tabs: AnyComponent<Empty>?
+-            if let tabContainerData = self.controller?.tabContainerData, tabContainerData.0.count > 1 {
++            if let tabContainerData = self.controller?.tabContainerData, tabContainerData.0.count > 1, self.folderRailWidth(layout: layout) == 0.0 {
+                 let folderFilterIndex: (ChatListFilterTabEntryId, [ChatListFilterTabEntry]) -> Int? = { id, entries in
+                     var index = 0
+                     for entry in entries {
+@@ -1880,7 +2003,12 @@ final class ChatListControllerNode: ASDisplayNode, ASGestureRecognizerDelegate {
+         }
+     }
+     
+-    func containerLayoutUpdated(_ layout: ContainerViewLayout, navigationBarHeight: CGFloat, visualNavigationHeight: CGFloat, cleanNavigationBarHeight: CGFloat, storiesInset: CGFloat, transition: ContainedViewLayoutTransition) {
++    func containerLayoutUpdated(_ inputLayout: ContainerViewLayout, navigationBarHeight: CGFloat, visualNavigationHeight: CGFloat, cleanNavigationBarHeight: CGFloat, storiesInset: CGFloat, transition: ContainedViewLayoutTransition) {
++        // Desktop-style folder column: reserve its width as an extra left safe inset, so the list and the header
++        // are laid out to the right of the column.
++        var layout = inputLayout
++        layout.safeInsets.left += self.folderRailWidth(layout: inputLayout)
++        
+         var navigationBarHeight = navigationBarHeight
+         var visualNavigationHeight = visualNavigationHeight
+         var cleanNavigationBarHeight = cleanNavigationBarHeight
+diff --git a/submodules/ChatListUI/Sources/ChatListFolderRailView.swift b/submodules/ChatListUI/Sources/ChatListFolderRailView.swift
+new file mode 100644
+index 0000000..b759529
+--- /dev/null
++++ b/submodules/ChatListUI/Sources/ChatListFolderRailView.swift
+@@ -0,0 +1,206 @@
++import Foundation
++import UIKit
++import Display
++import TelegramPresentationData
++import ChatListFilterTabContainerNode
++
++/// Vertical folder column in the style of Telegram Desktop: icon, title and an unread badge per folder,
++/// plus an "Edit" entry at the end. Shown to the left of the chat list when an iPhone is in landscape.
++final class ChatListFolderRailView: UIView {
++    struct Item: Equatable {
++        let id: ChatListFilterTabEntryId
++        let title: String
++        let badgeValue: Int
++        let badgeIsAccent: Bool
++    }
++    
++    static let railWidth: CGFloat = 64.0
++    
++    private final class ItemView: UIControl {
++        let selectionBackground = UIView()
++        let iconView = UIImageView()
++        let titleLabel = UILabel()
++        let badgeBackground = UIView()
++        let badgeLabel = UILabel()
++        
++        override init(frame: CGRect) {
++            super.init(frame: frame)
++            
++            self.selectionBackground.layer.cornerRadius = 10.0
++            self.selectionBackground.isUserInteractionEnabled = false
++            self.addSubview(self.selectionBackground)
++            
++            self.iconView.contentMode = .center
++            self.iconView.isUserInteractionEnabled = false
++            self.addSubview(self.iconView)
++            
++            self.titleLabel.font = Font.regular(10.0)
++            self.titleLabel.textAlignment = .center
++            self.titleLabel.lineBreakMode = .byTruncatingTail
++            self.titleLabel.isUserInteractionEnabled = false
++            self.addSubview(self.titleLabel)
++            
++            self.badgeBackground.isUserInteractionEnabled = false
++            self.badgeBackground.isHidden = true
++            self.addSubview(self.badgeBackground)
++            
++            self.badgeLabel.font = Font.with(size: 10.0, design: .regular, weight: .semibold, traits: [.monospacedNumbers])
++            self.badgeLabel.textAlignment = .center
++            self.badgeLabel.isUserInteractionEnabled = false
++            self.badgeBackground.addSubview(self.badgeLabel)
++        }
++        
++        required init?(coder: NSCoder) {
++            preconditionFailure()
++        }
++        
++        func update(
++            theme: PresentationTheme,
++            image: UIImage?,
++            title: String,
++            badgeValue: Int,
++            badgeIsAccent: Bool,
++            isSelected: Bool,
++            size: CGSize
++        ) {
++            let accentColor = theme.rootController.tabBar.selectedIconColor
++            let normalColor = theme.rootController.tabBar.iconColor
++            let tint = isSelected ? accentColor : normalColor
++            
++            self.selectionBackground.backgroundColor = accentColor.withAlphaComponent(0.14)
++            self.selectionBackground.isHidden = !isSelected
++            self.selectionBackground.frame = CGRect(x: 6.0, y: 2.0, width: size.width - 12.0, height: size.height - 4.0)
++            
++            self.iconView.image = image?.withRenderingMode(.alwaysTemplate)
++            self.iconView.tintColor = tint
++            self.iconView.frame = CGRect(x: floor((size.width - 28.0) / 2.0), y: 8.0, width: 28.0, height: 28.0)
++            
++            self.titleLabel.text = title
++            self.titleLabel.textColor = tint
++            self.titleLabel.frame = CGRect(x: 2.0, y: 38.0, width: size.width - 4.0, height: 14.0)
++            
++            if badgeValue > 0 {
++                let text = badgeValue > 999 ? "999+" : "\(badgeValue)"
++                self.badgeLabel.text = text
++                self.badgeLabel.textColor = badgeIsAccent ? theme.chatList.unreadBadgeActiveTextColor : theme.chatList.unreadBadgeInactiveTextColor
++                self.badgeBackground.backgroundColor = badgeIsAccent ? theme.chatList.unreadBadgeActiveBackgroundColor : theme.chatList.unreadBadgeInactiveBackgroundColor
++                
++                self.badgeLabel.sizeToFit()
++                let badgeHeight: CGFloat = 16.0
++                let badgeWidth = max(badgeHeight, ceil(self.badgeLabel.bounds.width) + 8.0)
++                self.badgeBackground.frame = CGRect(x: size.width - badgeWidth - 6.0, y: 4.0, width: badgeWidth, height: badgeHeight)
++                self.badgeBackground.layer.cornerRadius = badgeHeight / 2.0
++                self.badgeLabel.frame = CGRect(x: floor((badgeWidth - self.badgeLabel.bounds.width) / 2.0), y: floor((badgeHeight - self.badgeLabel.bounds.height) / 2.0), width: self.badgeLabel.bounds.width, height: self.badgeLabel.bounds.height)
++                self.badgeBackground.isHidden = false
++            } else {
++                self.badgeBackground.isHidden = true
++            }
++        }
++    }
++    
++    private let scrollView = UIScrollView()
++    private let separatorView = UIView()
++    private var itemViews: [ChatListFilterTabEntryId: ItemView] = [:]
++    private let editItemView = ItemView()
++    
++    var tabSelected: ((ChatListFilterTabEntryId) -> Void)?
++    var editPressed: (() -> Void)?
++    
++    override init(frame: CGRect) {
++        super.init(frame: frame)
++        
++        self.scrollView.showsVerticalScrollIndicator = false
++        self.scrollView.showsHorizontalScrollIndicator = false
++        self.scrollView.alwaysBounceVertical = true
++        self.scrollView.contentInsetAdjustmentBehavior = .never
++        self.addSubview(self.scrollView)
++        self.addSubview(self.separatorView)
++        
++        self.editItemView.addTarget(self, action: #selector(self.editItemPressed), for: .touchUpInside)
++        self.scrollView.addSubview(self.editItemView)
++    }
++    
++    required init?(coder: NSCoder) {
++        preconditionFailure()
++    }
++    
++    @objc private func editItemPressed() {
++        self.editPressed?()
++    }
++    
++    @objc private func itemPressed(_ sender: UIControl) {
++        for (id, view) in self.itemViews where view === sender {
++            self.tabSelected?(id)
++            return
++        }
++    }
++    
++    /// - Parameters:
++    ///   - leftInset: the left safe inset (iPhone notch in landscape): the background extends under it, items stay clear of it.
++    func update(theme: PresentationTheme, strings: PresentationStrings, items: [Item], selectedId: ChatListFilterTabEntryId, size: CGSize, leftInset: CGFloat, topInset: CGFloat, bottomInset: CGFloat) {
++        self.backgroundColor = theme.rootController.tabBar.backgroundColor
++        self.separatorView.backgroundColor = theme.rootController.tabBar.separatorColor
++        self.separatorView.frame = CGRect(x: size.width - UIScreenPixel, y: 0.0, width: UIScreenPixel, height: size.height)
++        
++        self.scrollView.frame = CGRect(origin: CGPoint(), size: size)
++        
++        let itemWidth = size.width - leftInset
++        let itemHeight: CGFloat = 56.0
++        let itemSize = CGSize(width: itemWidth, height: itemHeight)
++        
++        var validIds = Set<ChatListFilterTabEntryId>()
++        var y: CGFloat = topInset
++        for item in items {
++            validIds.insert(item.id)
++            
++            let itemView: ItemView
++            if let current = self.itemViews[item.id] {
++                itemView = current
++            } else {
++                itemView = ItemView()
++                itemView.addTarget(self, action: #selector(self.itemPressed(_:)), for: .touchUpInside)
++                self.itemViews[item.id] = itemView
++                self.scrollView.addSubview(itemView)
++            }
++            
++            let symbolName: String
++            if case .all = item.id {
++                symbolName = "bubble.left.and.bubble.right.fill"
++            } else {
++                symbolName = "folder.fill"
++            }
++            let configuration = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .regular)
++            itemView.update(
++                theme: theme,
++                image: UIImage(systemName: symbolName, withConfiguration: configuration),
++                title: item.title,
++                badgeValue: item.badgeValue,
++                badgeIsAccent: item.badgeIsAccent,
++                isSelected: item.id == selectedId,
++                size: itemSize
++            )
++            itemView.frame = CGRect(origin: CGPoint(x: leftInset, y: y), size: itemSize)
++            y += itemHeight
++        }
++        
++        for (id, view) in self.itemViews where !validIds.contains(id) {
++            view.removeFromSuperview()
++            self.itemViews.removeValue(forKey: id)
++        }
++        
++        let editConfiguration = UIImage.SymbolConfiguration(pointSize: 22.0, weight: .regular)
++        self.editItemView.update(
++            theme: theme,
++            image: UIImage(systemName: "slider.horizontal.3", withConfiguration: editConfiguration),
++            title: strings.Common_Edit,
++            badgeValue: 0,
++            badgeIsAccent: false,
++            isSelected: false,
++            size: itemSize
++        )
++        self.editItemView.frame = CGRect(origin: CGPoint(x: leftInset, y: y), size: itemSize)
++        y += itemHeight
++        
++        self.scrollView.contentSize = CGSize(width: size.width, height: y + bottomInset)
++    }
++}
+diff --git a/submodules/Display/Source/Font.swift b/submodules/Display/Source/Font.swift
+index e53d8ae..9040fdd 100644
+--- a/submodules/Display/Source/Font.swift
++++ b/submodules/Display/Source/Font.swift
+@@ -159,12 +159,56 @@ public struct Font {
+ 
+     private static let cache = Cache()
+     
++    /// The font family chosen in Settings > Appearance. Read once at launch, so a change needs a restart of the app.
++    public static let customFontFamilyDefaultsKey = "customFontFamily"
++    private static let customFontFamily: String? = {
++        guard let value = UserDefaults.standard.string(forKey: Font.customFontFamilyDefaultsKey), !value.isEmpty else {
++            return nil
++        }
++        return value
++    }()
++    
++    private static func customFont(size: CGFloat, weight: UIFont.Weight, italic: Bool) -> UIFont? {
++        guard let family = Font.customFontFamily else {
++            return nil
++        }
++        var descriptor: UIFontDescriptor
++        switch family {
++        case "__rounded__", "__serif__", "__mono__":
++            let base = UIFont.systemFont(ofSize: size, weight: weight).fontDescriptor
++            let design: UIFontDescriptor.SystemDesign
++            if family == "__rounded__" {
++                design = .rounded
++            } else if family == "__serif__" {
++                design = .serif
++            } else {
++                design = .monospaced
++            }
++            descriptor = base.withDesign(design) ?? base
++        default:
++            descriptor = UIFontDescriptor(fontAttributes: [.family: family]).addingAttributes([
++                UIFontDescriptor.AttributeName.traits: [UIFontDescriptor.TraitKey.weight: weight]
++            ])
++        }
++        if italic {
++            if let italicDescriptor = descriptor.withSymbolicTraits(descriptor.symbolicTraits.union(.traitItalic)) {
++                descriptor = italicDescriptor
++            }
++        }
++        return UIFont(descriptor: descriptor, size: size)
++    }
++    
++    
+     public static func with(size: CGFloat, design: Design = .regular, weight: Weight = .regular, width: Width = .standard, traits: Traits = []) -> UIFont {
+         let key = "\(size)_\(design.key)_\(weight.key)_\(width.key)_\(traits.rawValue)"
+         
+         if let cachedFont = self.cache.get(key) {
+             return cachedFont
+         }
++        if design == .regular, let customFont = Font.customFont(size: size, weight: weight.weight, italic: traits.contains(.italic)) {
++            self.cache.set(customFont, key: key)
++            return customFont
++        }
+         if #available(iOS 13.0, *), design != .camera {
+             let descriptor: UIFontDescriptor
+             if #available(iOS 14.0, *) {
+@@ -289,18 +333,30 @@ public struct Font {
+     }
+     
+     public static func regular(_ size: CGFloat) -> UIFont {
++        if let customFont = Font.customFont(size: size, weight: .regular, italic: false) {
++            return customFont
++        }
+         return UIFont.systemFont(ofSize: size)
+     }
+     
+     public static func medium(_ size: CGFloat) -> UIFont {
++        if let customFont = Font.customFont(size: size, weight: .medium, italic: false) {
++            return customFont
++        }
+         return UIFont.systemFont(ofSize: size, weight: UIFont.Weight.medium)
+     }
+     
+     public static func semibold(_ size: CGFloat) -> UIFont {
++        if let customFont = Font.customFont(size: size, weight: .semibold, italic: false) {
++            return customFont
++        }
+         return UIFont.systemFont(ofSize: size, weight: UIFont.Weight.semibold)
+     }
+     
+     public static func bold(_ size: CGFloat) -> UIFont {
++        if let customFont = Font.customFont(size: size, weight: .bold, italic: false) {
++            return customFont
++        }
+         if #available(iOS 8.2, *) {
+             return UIFont.boldSystemFont(ofSize: size)
+         } else {
+@@ -313,10 +369,16 @@ public struct Font {
+     }
+     
+     public static func light(_ size: CGFloat) -> UIFont {
++        if let customFont = Font.customFont(size: size, weight: .light, italic: false) {
++            return customFont
++        }
+         return UIFont.systemFont(ofSize: size, weight: UIFont.Weight.light)
+     }
+     
+     public static func semiboldItalic(_ size: CGFloat) -> UIFont {
++        if let customFont = Font.customFont(size: size, weight: .semibold, italic: true) {
++            return customFont
++        }
+         if let descriptor = UIFont.systemFont(ofSize: size).fontDescriptor.withSymbolicTraits([.traitBold, .traitItalic]) {
+             return UIFont(descriptor: descriptor, size: size)
+         } else {
+@@ -325,6 +387,9 @@ public struct Font {
+     }
+     
+     public static func mediumItalic(_ size: CGFloat) -> UIFont {
++        if let customFont = Font.customFont(size: size, weight: .medium, italic: true) {
++            return customFont
++        }
+         if let descriptor = UIFont.systemFont(ofSize: size, weight: .medium).fontDescriptor.withSymbolicTraits([.traitItalic]) {
+             return UIFont(descriptor: descriptor, size: size)
+         } else {
+@@ -349,6 +414,9 @@ public struct Font {
+     }
+     
+     public static func italic(_ size: CGFloat) -> UIFont {
++        if let customFont = Font.customFont(size: size, weight: .regular, italic: true) {
++            return customFont
++        }
+         return UIFont.italicSystemFont(ofSize: size)
+     }
+ }
+diff --git a/submodules/Display/Source/InAppKeyboard.swift b/submodules/Display/Source/InAppKeyboard.swift
+new file mode 100644
+index 0000000..314cbbd
+--- /dev/null
++++ b/submodules/Display/Source/InAppKeyboard.swift
+@@ -0,0 +1,593 @@
++import Foundation
++import UIKit
++
++private func inAppKeyboardColor(dark: UIColor, light: UIColor) -> UIColor {
++    return UIColor { traits in
++        return traits.userInterfaceStyle == .dark ? dark : light
++    }
++}
++
++/// Keeps the state of the keyboard that is drawn inside the chat pane (desktop-style layout on iPhone).
++/// The chat text view asks `inputViewOverride(for:)` for its `inputView`; while the text view lives in the
++/// detail pane, an empty view replaces the system keyboard and `InAppKeyboardView` is shown in the pane instead.
++public final class InAppKeyboardManager {
++    public static let shared = InAppKeyboardManager()
++    
++    private let emptyInputView = UIView(frame: CGRect())
++    
++    /// The view of the detail pane. Set by the split container.
++    weak var hostView: UIView?
++    /// Called when the keyboard appears or disappears, so that the split container can relayout.
++    var heightChanged: (() -> Void)?
++    
++    let keyboardView = InAppKeyboardView()
++    private(set) var isVisible: Bool = false
++    private weak var activeTextView: UITextView?
++    
++    private init() {
++        NotificationCenter.default.addObserver(forName: UITextView.textDidBeginEditingNotification, object: nil, queue: nil, using: { [weak self] notification in
++            guard let self, let textView = notification.object as? UITextView else {
++                return
++            }
++            if textView.inputView === self.emptyInputView {
++                self.activeTextView = textView
++                self.keyboardView.attach(textView: textView)
++                self.setVisible(true)
++            }
++        })
++        NotificationCenter.default.addObserver(forName: UITextView.textDidEndEditingNotification, object: nil, queue: nil, using: { [weak self] notification in
++            guard let self, let textView = notification.object as? UITextView else {
++                return
++            }
++            if self.activeTextView === textView {
++                self.activeTextView = nil
++                self.keyboardView.detach()
++                self.setVisible(false)
++            }
++        })
++    }
++    
++    private func setVisible(_ isVisible: Bool) {
++        if self.isVisible != isVisible {
++            self.isVisible = isVisible
++            self.heightChanged?()
++        }
++    }
++    
++    /// The replacement for the system keyboard of a text view, or nil to keep the system keyboard.
++    public func inputViewOverride(for textView: UITextView) -> UIView? {
++        guard UIDevice.current.userInterfaceIdiom == .phone, let hostView = self.hostView, hostView.window != nil else {
++            return nil
++        }
++        if textView.isDescendant(of: hostView) {
++            return self.emptyInputView
++        }
++        return nil
++    }
++    
++    /// The height of the keyboard including the bottom safe inset, 0 when it is hidden.
++    func keyboardHeight(bottomInset: CGFloat) -> CGFloat {
++        if self.isVisible {
++            return InAppKeyboardView.contentHeight + bottomInset
++        } else {
++            return 0.0
++        }
++    }
++}
++
++private final class InAppKeyboardKeyView: UIControl {
++    enum Style {
++        case letter
++        case special
++    }
++    
++    private let style: Style
++    private let titleLabel = UILabel()
++    private let iconView = UIImageView()
++    
++    var tapped: (() -> Void)?
++    var longPressed: (() -> Void)?
++    var pressBegan: (() -> Void)?
++    var pressEnded: (() -> Void)?
++    
++    var hasLongPress: Bool = false {
++        didSet {
++            self.longPressRecognizer.isEnabled = self.hasLongPress
++        }
++    }
++    private let longPressRecognizer = UILongPressGestureRecognizer()
++    
++    override var isHighlighted: Bool {
++        didSet {
++            self.updateBackground()
++        }
++    }
++    
++    init(style: Style) {
++        self.style = style
++        
++        super.init(frame: CGRect())
++        
++        self.layer.cornerRadius = 6.0
++        self.layer.cornerCurve = .continuous
++        
++        self.titleLabel.textAlignment = .center
++        self.titleLabel.font = UIFont.systemFont(ofSize: 21.0, weight: .regular)
++        self.titleLabel.textColor = inAppKeyboardColor(dark: .white, light: .black)
++        self.titleLabel.isUserInteractionEnabled = false
++        self.addSubview(self.titleLabel)
++        
++        self.iconView.contentMode = .center
++        self.iconView.tintColor = inAppKeyboardColor(dark: .white, light: .black)
++        self.iconView.isUserInteractionEnabled = false
++        self.addSubview(self.iconView)
++        
++        self.longPressRecognizer.minimumPressDuration = 0.4
++        self.longPressRecognizer.addTarget(self, action: #selector(self.longPressAction(_:)))
++        self.longPressRecognizer.isEnabled = false
++        self.addGestureRecognizer(self.longPressRecognizer)
++        
++        self.addTarget(self, action: #selector(self.touchDownAction), for: .touchDown)
++        self.addTarget(self, action: #selector(self.touchUpInsideAction), for: .touchUpInside)
++        self.addTarget(self, action: #selector(self.touchEndedAction), for: [.touchUpOutside, .touchCancel])
++        
++        self.updateBackground()
++    }
++    
++    required init?(coder: NSCoder) {
++        preconditionFailure()
++    }
++    
++    private func updateBackground() {
++        switch self.style {
++        case .letter:
++            self.backgroundColor = self.isHighlighted ? inAppKeyboardColor(dark: UIColor(white: 0.42, alpha: 1.0), light: UIColor(white: 0.80, alpha: 1.0)) : inAppKeyboardColor(dark: UIColor(white: 0.27, alpha: 1.0), light: .white)
++        case .special:
++            self.backgroundColor = self.isHighlighted ? inAppKeyboardColor(dark: UIColor(white: 0.42, alpha: 1.0), light: .white) : inAppKeyboardColor(dark: UIColor(white: 0.19, alpha: 1.0), light: UIColor(white: 0.70, alpha: 1.0))
++        }
++    }
++    
++    func setTitle(_ title: String?, fontSize: CGFloat = 21.0) {
++        self.titleLabel.text = title
++        self.titleLabel.font = UIFont.systemFont(ofSize: fontSize, weight: .regular)
++        self.iconView.image = nil
++        self.setNeedsLayout()
++    }
++    
++    func setSymbol(_ name: String) {
++        let configuration = UIImage.SymbolConfiguration(pointSize: 17.0, weight: .regular)
++        self.iconView.image = UIImage(systemName: name, withConfiguration: configuration)
++        self.titleLabel.text = nil
++        self.setNeedsLayout()
++    }
++    
++    override func layoutSubviews() {
++        super.layoutSubviews()
++        
++        self.titleLabel.frame = self.bounds
++        self.iconView.frame = self.bounds
++    }
++    
++    @objc private func touchDownAction() {
++        self.pressBegan?()
++    }
++    
++    @objc private func touchUpInsideAction() {
++        self.pressEnded?()
++        self.tapped?()
++    }
++    
++    @objc private func touchEndedAction() {
++        self.pressEnded?()
++    }
++    
++    @objc private func longPressAction(_ recognizer: UILongPressGestureRecognizer) {
++        if case .began = recognizer.state {
++            self.longPressed?()
++        }
++    }
++}
++
++final class InAppKeyboardView: UIView {
++    static let rowHeight: CGFloat = 34.0
++    static let spacing: CGFloat = 5.0
++    static var contentHeight: CGFloat {
++        return rowHeight * 4.0 + spacing * 5.0
++    }
++    
++    private enum Page {
++        case letters
++        case symbols
++    }
++    
++    private enum Language: Int {
++        case russian
++        case english
++    }
++    
++    private enum ShiftState {
++        case off
++        case once
++        case caps
++    }
++    
++    private enum Kind {
++        case character(String)
++        case shift
++        case backspace
++        case page
++        case language
++        case space
++        case newline
++    }
++    
++    private struct KeySpec {
++        let kind: Kind
++        let weight: CGFloat
++    }
++    
++    private static let languageDefaultsKey = "inAppKeyboard.language"
++    
++    private weak var textView: UITextView?
++    var bottomInset: CGFloat = 0.0 {
++        didSet {
++            if self.bottomInset != oldValue {
++                self.setNeedsLayout()
++            }
++        }
++    }
++    
++    private var page: Page = .letters
++    private var language: Language
++    private var shift: ShiftState = .once
++    private var lastShiftTapTimestamp: Double = 0.0
++    
++    private var rows: [[(spec: KeySpec, view: InAppKeyboardKeyView)]] = []
++    private var shiftKeyView: InAppKeyboardKeyView?
++    private var characterKeyViews: [(title: String, view: InAppKeyboardKeyView)] = []
++    private var pageKeyView: InAppKeyboardKeyView?
++    private var spaceKeyView: InAppKeyboardKeyView?
++    
++    private var backspaceTimer: Timer?
++    private let feedbackGenerator = UIImpactFeedbackGenerator(style: .light)
++    
++    init() {
++        let storedLanguage = UserDefaults.standard.integer(forKey: InAppKeyboardView.languageDefaultsKey)
++        self.language = Language(rawValue: storedLanguage) ?? .russian
++        
++        super.init(frame: CGRect())
++        
++        self.backgroundColor = inAppKeyboardColor(dark: UIColor(white: 0.11, alpha: 1.0), light: UIColor(white: 0.82, alpha: 1.0))
++        self.rebuildKeys()
++    }
++    
++    required init?(coder: NSCoder) {
++        preconditionFailure()
++    }
++    
++    deinit {
++        self.backspaceTimer?.invalidate()
++    }
++    
++    func attach(textView: UITextView) {
++        self.textView = textView
++        self.page = .letters
++        self.rebuildKeys()
++        self.updateAutoShift()
++    }
++    
++    func detach() {
++        self.stopBackspaceRepeat()
++        self.textView = nil
++    }
++    
++    // MARK: - Keys
++    
++    private func specs() -> [[KeySpec]] {
++        func characters(_ string: String) -> [KeySpec] {
++            return string.map { KeySpec(kind: .character(String($0)), weight: 1.0) }
++        }
++        
++        var result: [[KeySpec]] = []
++        switch self.page {
++        case .letters:
++            let lines: [String]
++            switch self.language {
++            case .russian:
++                lines = ["йцукенгшщзх", "фывапролджэ", "ячсмитьбю"]
++            case .english:
++                lines = ["qwertyuiop", "asdfghjkl", "zxcvbnm"]
++            }
++            let sideWeight: CGFloat = self.language == .russian ? 1.0 : 1.5
++            result.append(characters(lines[0]))
++            result.append(characters(lines[1]))
++            result.append([KeySpec(kind: .shift, weight: sideWeight)] + characters(lines[2]) + [KeySpec(kind: .backspace, weight: sideWeight)])
++        case .symbols:
++            result.append(characters("1234567890"))
++            result.append(["-", "/", ":", ";", "(", ")", "\u{20BD}", "&", "@", "\""].map { KeySpec(kind: .character($0), weight: 1.0) })
++            result.append(["%", ".", ",", "?", "!", "'", "+", "="].map { KeySpec(kind: .character($0), weight: 1.0) } + [KeySpec(kind: .backspace, weight: 1.5)])
++        }
++        result.append([
++            KeySpec(kind: .page, weight: 1.6),
++            KeySpec(kind: .language, weight: 1.2),
++            KeySpec(kind: .space, weight: 0.0),
++            KeySpec(kind: .newline, weight: 2.2)
++        ])
++        return result
++    }
++    
++    private func rebuildKeys() {
++        self.stopBackspaceRepeat()
++        for row in self.rows {
++            for item in row {
++                item.view.removeFromSuperview()
++            }
++        }
++        self.rows = []
++        self.characterKeyViews = []
++        self.shiftKeyView = nil
++        self.pageKeyView = nil
++        self.spaceKeyView = nil
++        
++        for rowSpecs in self.specs() {
++            var row: [(spec: KeySpec, view: InAppKeyboardKeyView)] = []
++            for spec in rowSpecs {
++                let view = self.makeKeyView(spec: spec)
++                self.addSubview(view)
++                row.append((spec, view))
++            }
++            self.rows.append(row)
++        }
++        self.refreshTitles()
++        self.setNeedsLayout()
++    }
++    
++    private func makeKeyView(spec: KeySpec) -> InAppKeyboardKeyView {
++        switch spec.kind {
++        case let .character(title):
++            let view = InAppKeyboardKeyView(style: .letter)
++            view.tapped = { [weak self] in
++                self?.insertCharacter(title)
++            }
++            if self.page == .letters, self.language == .russian {
++                // Long press inserts the alternative character, as on the system keyboard.
++                let alternatives: [String: String] = ["е": "ё", "ь": "ъ"]
++                if let alternative = alternatives[title] {
++                    view.hasLongPress = true
++                    view.longPressed = { [weak self] in
++                        self?.insertCharacter(alternative)
++                    }
++                }
++            }
++            self.characterKeyViews.append((title, view))
++            return view
++        case .shift:
++            let view = InAppKeyboardKeyView(style: .special)
++            view.tapped = { [weak self] in
++                self?.shiftPressed()
++            }
++            self.shiftKeyView = view
++            return view
++        case .backspace:
++            let view = InAppKeyboardKeyView(style: .special)
++            view.setSymbol("delete.left")
++            view.pressBegan = { [weak self] in
++                self?.startBackspaceRepeat()
++            }
++            view.pressEnded = { [weak self] in
++                self?.stopBackspaceRepeat()
++            }
++            return view
++        case .page:
++            let view = InAppKeyboardKeyView(style: .special)
++            view.tapped = { [weak self] in
++                guard let self else {
++                    return
++                }
++                self.feedbackGenerator.impactOccurred()
++                self.page = self.page == .letters ? .symbols : .letters
++                self.rebuildKeys()
++                self.updateAutoShift()
++            }
++            self.pageKeyView = view
++            return view
++        case .language:
++            let view = InAppKeyboardKeyView(style: .special)
++            view.setSymbol("globe")
++            view.tapped = { [weak self] in
++                guard let self else {
++                    return
++                }
++                self.feedbackGenerator.impactOccurred()
++                self.language = self.language == .russian ? .english : .russian
++                UserDefaults.standard.set(self.language.rawValue, forKey: InAppKeyboardView.languageDefaultsKey)
++                self.page = .letters
++                self.rebuildKeys()
++                self.updateAutoShift()
++            }
++            return view
++        case .space:
++            let view = InAppKeyboardKeyView(style: .letter)
++            view.tapped = { [weak self] in
++                guard let self else {
++                    return
++                }
++                self.feedbackGenerator.impactOccurred()
++                self.textView?.insertText(" ")
++                self.updateAutoShift()
++            }
++            self.spaceKeyView = view
++            return view
++        case .newline:
++            let view = InAppKeyboardKeyView(style: .special)
++            view.setSymbol("return")
++            view.tapped = { [weak self] in
++                guard let self else {
++                    return
++                }
++                self.feedbackGenerator.impactOccurred()
++                self.textView?.insertText("\n")
++                self.updateAutoShift()
++            }
++            return view
++        }
++    }
++    
++    private func refreshTitles() {
++        let isUppercase = self.page == .letters && self.shift != .off
++        for item in self.characterKeyViews {
++            item.view.setTitle(isUppercase ? item.title.uppercased() : item.title)
++        }
++        
++        if let shiftKeyView = self.shiftKeyView {
++            switch self.shift {
++            case .off:
++                shiftKeyView.setSymbol("shift")
++            case .once:
++                shiftKeyView.setSymbol("shift.fill")
++            case .caps:
++                shiftKeyView.setSymbol("capslock.fill")
++            }
++        }
++        
++        if let pageKeyView = self.pageKeyView {
++            switch self.page {
++            case .letters:
++                pageKeyView.setTitle("123", fontSize: 17.0)
++            case .symbols:
++                pageKeyView.setTitle(self.language == .russian ? "\u{0430}\u{0431}\u{0432}" : "ABC", fontSize: 17.0)
++            }
++        }
++        
++        if let spaceKeyView = self.spaceKeyView {
++            spaceKeyView.setTitle(self.language == .russian ? "\u{0440}\u{0443}" : "en", fontSize: 14.0)
++        }
++    }
++    
++    // MARK: - Layout
++    
++    override func layoutSubviews() {
++        super.layoutSubviews()
++        
++        let spacing = InAppKeyboardView.spacing
++        let margin: CGFloat = 6.0
++        let availableWidth = self.bounds.width - margin * 2.0
++        if availableWidth <= 0.0 || self.rows.isEmpty {
++            return
++        }
++        
++        let topRowCount = CGFloat(max(self.rows[0].count, 1))
++        let unit = (availableWidth - spacing * (topRowCount - 1.0)) / topRowCount
++        
++        var y = spacing
++        for row in self.rows {
++            var fixedWidth: CGFloat = 0.0
++            var hasFlexibleKey = false
++            for item in row {
++                if item.spec.weight > 0.0 {
++                    fixedWidth += item.spec.weight * unit
++                } else {
++                    hasFlexibleKey = true
++                }
++            }
++            let totalSpacing = spacing * CGFloat(max(row.count - 1, 0))
++            let flexibleWidth = max(0.0, availableWidth - fixedWidth - totalSpacing)
++            let rowWidth = hasFlexibleKey ? availableWidth : fixedWidth + totalSpacing
++            
++            var x = margin + floor((availableWidth - rowWidth) / 2.0)
++            for item in row {
++                let width = item.spec.weight > 0.0 ? item.spec.weight * unit : flexibleWidth
++                item.view.frame = CGRect(x: floor(x), y: y, width: floor(width), height: InAppKeyboardView.rowHeight)
++                x += width + spacing
++            }
++            y += InAppKeyboardView.rowHeight + spacing
++        }
++    }
++    
++    // MARK: - Actions
++    
++    private func insertCharacter(_ title: String) {
++        guard let textView = self.textView else {
++            return
++        }
++        self.feedbackGenerator.impactOccurred()
++        let isUppercase = self.page == .letters && self.shift != .off
++        textView.insertText(isUppercase ? title.uppercased() : title)
++        if self.shift == .once {
++            self.shift = .off
++            self.refreshTitles()
++        }
++        self.updateAutoShift()
++    }
++    
++    private func shiftPressed() {
++        self.feedbackGenerator.impactOccurred()
++        let now = CACurrentMediaTime()
++        switch self.shift {
++        case .off:
++            self.shift = .once
++        case .once:
++            self.shift = now - self.lastShiftTapTimestamp < 0.35 ? .caps : .off
++        case .caps:
++            self.shift = .off
++        }
++        self.lastShiftTapTimestamp = now
++        self.refreshTitles()
++    }
++    
++    private func startBackspaceRepeat() {
++        self.stopBackspaceRepeat()
++        self.feedbackGenerator.impactOccurred()
++        self.deleteBackward()
++        let timer = Timer(timeInterval: 0.4, repeats: false, block: { [weak self] _ in
++            guard let self else {
++                return
++            }
++            let repeatTimer = Timer(timeInterval: 0.07, repeats: true, block: { [weak self] _ in
++                self?.deleteBackward()
++            })
++            RunLoop.main.add(repeatTimer, forMode: .common)
++            self.backspaceTimer = repeatTimer
++        })
++        RunLoop.main.add(timer, forMode: .common)
++        self.backspaceTimer = timer
++    }
++    
++    private func stopBackspaceRepeat() {
++        self.backspaceTimer?.invalidate()
++        self.backspaceTimer = nil
++    }
++    
++    private func deleteBackward() {
++        self.textView?.deleteBackward()
++        self.updateAutoShift()
++    }
++    
++    /// Capitalizes the first letter of the text and the first letter after a sentence end.
++    private func updateAutoShift() {
++        if self.shift == .caps {
++            return
++        }
++        let shouldCapitalize = self.page == .letters && self.shouldCapitalizeNextCharacter()
++        let updatedShift: ShiftState = shouldCapitalize ? .once : .off
++        if self.shift != updatedShift {
++            self.shift = updatedShift
++            self.refreshTitles()
++        }
++    }
++    
++    private func shouldCapitalizeNextCharacter() -> Bool {
++        guard let textView = self.textView, let selectedRange = textView.selectedTextRange, let range = textView.textRange(from: textView.beginningOfDocument, to: selectedRange.start) else {
++            return false
++        }
++        let text = textView.text(in: range) ?? ""
++        if text.isEmpty || text.hasSuffix("\n") {
++            return true
++        }
++        if text.hasSuffix(" ") {
++            let trimmed = text.trimmingCharacters(in: .whitespaces)
++            return trimmed.hasSuffix(".") || trimmed.hasSuffix("!") || trimmed.hasSuffix("?") || trimmed.isEmpty
++        }
++        return false
++    }
++}
+diff --git a/submodules/Display/Source/Navigation/NavigationSplitContainer.swift b/submodules/Display/Source/Navigation/NavigationSplitContainer.swift
+index fb22822..f17bf3a 100644
+--- a/submodules/Display/Source/Navigation/NavigationSplitContainer.swift
++++ b/submodules/Display/Source/Navigation/NavigationSplitContainer.swift
+@@ -16,6 +16,10 @@ public func splitMasterWidth(containerSize: CGSize, division: CGRect?) -> CGFloa
+     if let division, division.width < containerSize.width, division.minY <= 0.5, division.maxY >= containerSize.height - 0.5 {
+         return floorToScreenPixels(division.midX)
+     }
++    if UIDevice.current.userInterfaceIdiom == .phone {
++        // iPhone in landscape: the master pane also holds the vertical folder column, so it is a bit wider.
++        return min(max(380.0, floor(containerSize.width * 0.42)), floor(containerSize.width / 2.0))
++    }
+     return min(max(320.0, floor(containerSize.width / 3.0)), floor(containerSize.width / 2.0))
+ }
+ 
+@@ -29,6 +33,8 @@ final class NavigationSplitContainer: ASDisplayNode {
+     private(set) var masterControllers: [ViewController] = []
+     private(set) var detailControllers: [ViewController] = []
+     
++    private var lastUpdateParams: (layout: ContainerViewLayout, masterControllers: [ViewController], detailControllers: [ViewController], detailsPlaceholderNode: NavigationDetailsPlaceholderNode?)?
++    
+     var canHaveKeyboardFocus: Bool = false {
+         didSet {
+             self.masterContainer.canHaveKeyboardFocus = self.canHaveKeyboardFocus
+@@ -67,6 +73,22 @@ final class NavigationSplitContainer: ASDisplayNode {
+         self.addSubnode(self.separator)
+     }
+     
++    override func didLoad() {
++        super.didLoad()
++        
++        // Desktop-style layout: the keyboard of the chat is drawn inside the detail pane (see InAppKeyboardManager).
++        if UIDevice.current.userInterfaceIdiom == .phone {
++            self.view.addSubview(InAppKeyboardManager.shared.keyboardView)
++        }
++    }
++    
++    private func updateForInAppKeyboard() {
++        guard let params = self.lastUpdateParams else {
++            return
++        }
++        self.update(layout: params.layout, masterControllers: params.masterControllers, detailControllers: params.detailControllers, detailsPlaceholderNode: params.detailsPlaceholderNode, transition: .animated(duration: 0.25, curve: .easeInOut))
++    }
++    
+     func hasNonReadyControllers() -> Bool {
+         if self.masterContainer.hasNonReadyControllers() {
+             return true
+@@ -102,9 +124,31 @@ final class NavigationSplitContainer: ASDisplayNode {
+     }
+ 
+     func update(layout: ContainerViewLayout, masterControllers: [ViewController], detailControllers: [ViewController], detailsPlaceholderNode: NavigationDetailsPlaceholderNode?, transition: ContainedViewLayoutTransition) {
++        self.lastUpdateParams = (layout, masterControllers, detailControllers, detailsPlaceholderNode)
++        
+         let masterWidth = splitMasterWidth(containerSize: layout.size, division: layout.division)
+         let detailWidth = layout.size.width - masterWidth
+         
++        var detailInputHeight: CGFloat? = layout.inputHeight
++        if UIDevice.current.userInterfaceIdiom == .phone {
++            let keyboardManager = InAppKeyboardManager.shared
++            keyboardManager.hostView = self.detailContainer.view
++            keyboardManager.heightChanged = { [weak self] in
++                self?.updateForInAppKeyboard()
++            }
++            let keyboardHeight = keyboardManager.keyboardHeight(bottomInset: layout.intrinsicInsets.bottom)
++            let keyboardView = keyboardManager.keyboardView
++            keyboardView.bottomInset = layout.intrinsicInsets.bottom
++            if keyboardView.superview !== self.view {
++                self.view.addSubview(keyboardView)
++            }
++            self.view.bringSubviewToFront(keyboardView)
++            transition.updateFrame(view: keyboardView, frame: CGRect(origin: CGPoint(x: masterWidth, y: layout.size.height - keyboardHeight), size: CGSize(width: detailWidth, height: InAppKeyboardView.contentHeight + layout.intrinsicInsets.bottom)))
++            if keyboardHeight > 0.0 {
++                detailInputHeight = keyboardHeight
++            }
++        }
++        
+         transition.updateFrame(node: self.masterContainer, frame: CGRect(origin: CGPoint(), size: CGSize(width: masterWidth, height: layout.size.height)))
+         transition.updateFrame(node: self.detailContainer, frame: CGRect(origin: CGPoint(x: masterWidth, y: 0.0), size: CGSize(width: detailWidth, height: layout.size.height)))
+         transition.updateFrame(node: self.separator, frame: CGRect(origin: CGPoint(x: masterWidth, y: 0.0), size: CGSize(width: UIScreenPixel, height: layout.size.height)))
+@@ -125,7 +169,7 @@ final class NavigationSplitContainer: ASDisplayNode {
+         let detailReserved = reservedAreaForPane(corners: layout.reservedCorners, division: layout.division, paneFrame: CGRect(x: masterWidth, y: 0.0, width: detailWidth, height: layout.size.height), containerSize: layout.size)
+         
+         self.masterContainer.update(layout: ContainerViewLayout(size: CGSize(width: masterWidth, height: layout.size.height), metrics: layout.metrics, deviceMetrics: layout.deviceMetrics, intrinsicInsets: layout.intrinsicInsets, safeInsets: masterSafeInsets, reservedCorners: masterReserved.corners, division: masterReserved.division, additionalInsets: UIEdgeInsets(), statusBarHeight: layout.statusBarHeight, inputHeight: layout.inputHeight, inputHeightIsInteractivellyChanging: layout.inputHeightIsInteractivellyChanging, inVoiceOver: layout.inVoiceOver, presentedInFormSheet: layout.presentedInFormSheet), canBeClosed: false, controllers: masterControllers, transition: transition)
+-        self.detailContainer.update(layout: ContainerViewLayout(size: CGSize(width: detailWidth, height: layout.size.height), metrics: layout.metrics, deviceMetrics: layout.deviceMetrics, intrinsicInsets: layout.intrinsicInsets, safeInsets: detailSafeInsets, reservedCorners: detailReserved.corners, division: detailReserved.division, additionalInsets: layout.additionalInsets, statusBarHeight: layout.statusBarHeight, inputHeight: layout.inputHeight, inputHeightIsInteractivellyChanging: layout.inputHeightIsInteractivellyChanging, inVoiceOver: layout.inVoiceOver, presentedInFormSheet: layout.presentedInFormSheet), canBeClosed: true, controllers: detailControllers, transition: transition)
++        self.detailContainer.update(layout: ContainerViewLayout(size: CGSize(width: detailWidth, height: layout.size.height), metrics: layout.metrics, deviceMetrics: layout.deviceMetrics, intrinsicInsets: layout.intrinsicInsets, safeInsets: detailSafeInsets, reservedCorners: detailReserved.corners, division: detailReserved.division, additionalInsets: layout.additionalInsets, statusBarHeight: layout.statusBarHeight, inputHeight: detailInputHeight, inputHeightIsInteractivellyChanging: layout.inputHeightIsInteractivellyChanging, inVoiceOver: layout.inVoiceOver, presentedInFormSheet: layout.presentedInFormSheet), canBeClosed: true, controllers: detailControllers, transition: transition)
+         
+         var controllersUpdated = false
+         if self.detailControllers.last !== detailControllers.last {
+@@ -141,9 +185,28 @@ final class NavigationSplitContainer: ASDisplayNode {
+             }
+         }
+         
++        let detailChanged = self.detailControllers.last !== detailControllers.last && detailControllers.last != nil
++        
+         self.masterControllers = masterControllers
+         self.detailControllers = detailControllers
+         
++        // Desktop-style layout: a chat opened in the right pane slides in and fades in.
++        if detailChanged, UIDevice.current.userInterfaceIdiom == .phone, self.isNodeLoaded {
++            let detailLayer = self.detailContainer.layer
++            let slideAnimation = CABasicAnimation(keyPath: "transform.translation.x")
++            slideAnimation.fromValue = 28.0
++            slideAnimation.toValue = 0.0
++            slideAnimation.duration = 0.3
++            slideAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
++            detailLayer.add(slideAnimation, forKey: "desktopDetailSlide")
++            let fadeAnimation = CABasicAnimation(keyPath: "opacity")
++            fadeAnimation.fromValue = 0.0
++            fadeAnimation.toValue = 1.0
++            fadeAnimation.duration = 0.3
++            fadeAnimation.timingFunction = CAMediaTimingFunction(name: .easeOut)
++            detailLayer.add(fadeAnimation, forKey: "desktopDetailFade")
++        }
++        
+         if controllersUpdated {
+             let data = self.detailControllers.last?.customData
+             for controller in self.masterControllers {
+diff --git a/submodules/Display/Source/WindowContent.swift b/submodules/Display/Source/WindowContent.swift
+index 8873fc6..3c2e701 100644
+--- a/submodules/Display/Source/WindowContent.swift
++++ b/submodules/Display/Source/WindowContent.swift
+@@ -344,6 +344,9 @@ public extension UIView {
+ private func layoutMetricsForWindowSize(size: CGSize, orientation: UIInterfaceOrientation?) -> LayoutMetrics {
+     if size.width > 690.0 && size.height > 650.0 {
+         return LayoutMetrics(widthClass: .regular, heightClass: .regular, orientation: orientation, windowSize: size)
++    } else if UIDevice.current.userInterfaceIdiom == .phone && size.width > size.height && size.width >= 640.0 {
++        // Desktop-style layout: on an iPhone in landscape use the wide (split) layout - chat list on the left, chat on the right.
++        return LayoutMetrics(widthClass: .regular, heightClass: .compact, orientation: orientation, windowSize: size)
+     } else {
+         return LayoutMetrics(widthClass: .compact, heightClass: .compact, orientation: orientation, windowSize: size)
+     }
+@@ -1134,6 +1137,10 @@ public class Window1 {
+                         case .compact:
+                             resolvedOrientations = supportedOrientations.compactSize
+                         }
++                        if UIDevice.current.userInterfaceIdiom == .phone {
++                            // Desktop-style layout: the iPhone app always runs in landscape.
++                            resolvedOrientations = .landscape
++                        }
+                         if resolvedOrientations.isEmpty {
+                             resolvedOrientations = [.portrait]
+                         }
+@@ -1282,6 +1289,10 @@ public class Window1 {
+                 case .compact:
+                     resolvedOrientations = supportedOrientations.compactSize
+             }
++            if UIDevice.current.userInterfaceIdiom == .phone {
++                // Desktop-style layout: the iPhone app always runs in landscape.
++                resolvedOrientations = .landscape
++            }
+             if resolvedOrientations.isEmpty {
+                 resolvedOrientations = [.portrait]
+             }
+@@ -1321,6 +1332,10 @@ public class Window1 {
+                     case .compact:
+                         resolvedOrientations = supportedOrientations.compactSize
+                 }
++                if UIDevice.current.userInterfaceIdiom == .phone {
++                    // Desktop-style layout: the iPhone app always runs in landscape.
++                    resolvedOrientations = .landscape
++                }
+                 if resolvedOrientations.isEmpty {
+                     resolvedOrientations = [.portrait]
+                 }
+diff --git a/submodules/SettingsUI/Sources/Themes/ThemeSettingsController.swift b/submodules/SettingsUI/Sources/Themes/ThemeSettingsController.swift
+index 6b74164..52ebd38 100644
+--- a/submodules/SettingsUI/Sources/Themes/ThemeSettingsController.swift
++++ b/submodules/SettingsUI/Sources/Themes/ThemeSettingsController.swift
+@@ -35,6 +35,7 @@ private final class ThemeSettingsControllerArguments {
+     let toggleNightTheme: (Bool) -> Void
+     let openAutoNightTheme: () -> Void
+     let openTextSize: () -> Void
++    let openFontFamily: () -> Void
+     let openBubbleSettings: () -> Void
+     let openPowerSavingSettings: () -> Void
+     let openStickersAndEmoji: () -> Void
+@@ -56,6 +57,7 @@ private final class ThemeSettingsControllerArguments {
+         toggleNightTheme: @escaping (Bool) -> Void,
+         openAutoNightTheme: @escaping () -> Void,
+         openTextSize: @escaping () -> Void,
++        openFontFamily: @escaping () -> Void,
+         openBubbleSettings: @escaping () -> Void,
+         openPowerSavingSettings: @escaping () -> Void,
+         openStickersAndEmoji: @escaping () -> Void,
+@@ -76,6 +78,7 @@ private final class ThemeSettingsControllerArguments {
+         self.toggleNightTheme = toggleNightTheme
+         self.openAutoNightTheme = openAutoNightTheme
+         self.openTextSize = openTextSize
++        self.openFontFamily = openFontFamily
+         self.openBubbleSettings = openBubbleSettings
+         self.openPowerSavingSettings = openPowerSavingSettings
+         self.openStickersAndEmoji = openStickersAndEmoji
+@@ -120,6 +123,29 @@ public enum ThemeSettingsEntryTag: ItemListItemTag {
+     }
+ }
+ 
++private let fontFamilyOptions: [(id: String, title: String)] = [
++    ("", ""),
++    ("__rounded__", "SF Rounded"),
++    ("__serif__", "New York (Serif)"),
++    ("__mono__", "SF Mono"),
++    ("Georgia", "Georgia"),
++    ("Helvetica Neue", "Helvetica Neue"),
++    ("Palatino", "Palatino"),
++    ("Times New Roman", "Times New Roman"),
++    ("Verdana", "Verdana"),
++    ("Trebuchet MS", "Trebuchet MS"),
++    ("Courier New", "Courier New"),
++    ("Menlo", "Menlo")
++]
++
++private func currentFontFamilyTitle(isRussian: Bool) -> String {
++    let current = UserDefaults.standard.string(forKey: Font.customFontFamilyDefaultsKey) ?? ""
++    if let option = fontFamilyOptions.first(where: { $0.id == current }), !option.id.isEmpty {
++        return option.title
++    }
++    return isRussian ? "По умолчанию" : "Default"
++}
++
+ private enum ThemeSettingsControllerEntry: ItemListNodeEntry {
+     case themeListHeader(PresentationTheme, String)
+     case chatPreview(PresentationTheme, TelegramWallpaper, PresentationFontSize, PresentationChatBubbleCorners, PresentationStrings, PresentationDateTimeFormat, PresentationPersonNameOrder, [ChatPreviewMessageItem])
+@@ -130,6 +156,7 @@ private enum ThemeSettingsControllerEntry: ItemListNodeEntry {
+     case autoNight(PresentationTheme, String, Bool, Bool)
+     case autoNightTheme(PresentationTheme, String, String)
+     case textSize(PresentationTheme, String, String)
++    case fontFamily(PresentationTheme, String, String)
+     case bubbleSettings(PresentationTheme, String, String)
+     case iconHeader(PresentationTheme, String)
+     case iconItem(PresentationTheme, PresentationStrings, [PresentationAppIcon], Bool, String?)
+@@ -146,7 +173,7 @@ private enum ThemeSettingsControllerEntry: ItemListNodeEntry {
+                 return ThemeSettingsControllerSection.chatPreview.rawValue
+             case .autoNight, .autoNightTheme:
+                 return ThemeSettingsControllerSection.nightMode.rawValue
+-            case .textSize, .bubbleSettings:
++            case .textSize, .fontFamily, .bubbleSettings:
+                 return ThemeSettingsControllerSection.message.rawValue
+             case .iconHeader, .iconItem:
+                 return ThemeSettingsControllerSection.icon.rawValue
+@@ -177,24 +204,26 @@ private enum ThemeSettingsControllerEntry: ItemListNodeEntry {
+             return 7
+         case .textSize:
+             return 8
+-        case .bubbleSettings:
++        case .fontFamily:
+             return 9
+-        case .powerSaving:
++        case .bubbleSettings:
+             return 10
+-        case .stickersAndEmoji:
++        case .powerSaving:
+             return 11
+-        case .iconHeader:
++        case .stickersAndEmoji:
+             return 12
+-        case .iconItem:
++        case .iconHeader:
+             return 13
+-        case .otherHeader:
++        case .iconItem:
+             return 14
+-        case .sendWithCmdEnter:
++        case .otherHeader:
+             return 15
+-        case .showNextMediaOnTap:
++        case .sendWithCmdEnter:
+             return 16
+-        case .showNextMediaOnTapInfo:
++        case .showNextMediaOnTap:
+             return 17
++        case .showNextMediaOnTapInfo:
++            return 18
+         }
+     }
+     
+@@ -248,6 +277,12 @@ private enum ThemeSettingsControllerEntry: ItemListNodeEntry {
+                 } else {
+                     return false
+                 }
++            case let .fontFamily(lhsTheme, lhsText, lhsValue):
++                if case let .fontFamily(rhsTheme, rhsText, rhsValue) = rhs, lhsTheme === rhsTheme, lhsText == rhsText, lhsValue == rhsValue {
++                    return true
++                } else {
++                    return false
++                }
+             case let .bubbleSettings(lhsTheme, lhsText, lhsValue):
+                 if case let .bubbleSettings(rhsTheme, rhsText, rhsValue) = rhs, lhsTheme === rhsTheme, lhsText == rhsText, lhsValue == rhsValue {
+                     return true
+@@ -362,6 +397,10 @@ private enum ThemeSettingsControllerEntry: ItemListNodeEntry {
+                 return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, icon: nil, title: text, label: value, labelStyle: .text, sectionId: self.section, style: .blocks, disclosureStyle: .arrow, action: {
+                     arguments.openTextSize()
+                 })
++            case let .fontFamily(_, text, value):
++                return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, icon: nil, title: text, label: value, labelStyle: .text, sectionId: self.section, style: .blocks, disclosureStyle: .arrow, action: {
++                    arguments.openFontFamily()
++                })
+             case let .bubbleSettings(_, text, value):
+                 return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, icon: nil, title: text, label: value, labelStyle: .text, sectionId: self.section, style: .blocks, disclosureStyle: .arrow, action: {
+                     arguments.openBubbleSettings()
+@@ -478,6 +517,7 @@ private func themeSettingsControllerEntries(
+         }
+     }
+     entries.append(.textSize(presentationData.theme, strings.Appearance_TextSizeSetting, textSizeValue))
++    entries.append(.fontFamily(presentationData.theme, strings.primaryComponent.languageCode.hasPrefix("ru") ? "Шрифт" : "Font", currentFontFamilyTitle(isRussian: strings.primaryComponent.languageCode.hasPrefix("ru"))))
+     entries.append(.bubbleSettings(presentationData.theme, strings.Appearance_BubbleCornersSetting, ""))
+     entries.append(.powerSaving)
+     entries.append(.stickersAndEmoji)
+@@ -597,6 +637,29 @@ public func themeSettingsController(context: AccountContext, focusOnItemTag: The
+             let settings = view.entries[ApplicationSpecificSharedDataKeys.presentationThemeSettings]?.get(PresentationThemeSettings.self) ?? PresentationThemeSettings.defaultSettings
+             pushControllerImpl?(TextSizeSelectionController(context: context, presentationThemeSettings: settings))
+         })
++    }, openFontFamily: {
++        let presentationData = context.sharedContext.currentPresentationData.with { $0 }
++        let isRussian = presentationData.strings.primaryComponent.languageCode.hasPrefix("ru")
++        let actionSheet = ActionSheetController(presentationData: presentationData)
++        var items: [ActionSheetItem] = []
++        for option in fontFamilyOptions {
++            let title = option.id.isEmpty ? (isRussian ? "По умолчанию (SF Pro)" : "Default (SF Pro)") : option.title
++            items.append(ActionSheetButtonItem(title: title, color: .accent, action: { [weak actionSheet] in
++                actionSheet?.dismissAnimated()
++                if option.id.isEmpty {
++                    UserDefaults.standard.removeObject(forKey: Font.customFontFamilyDefaultsKey)
++                } else {
++                    UserDefaults.standard.set(option.id, forKey: Font.customFontFamilyDefaultsKey)
++                }
++                presentControllerImpl?(textAlertController(context: context, title: nil, text: isRussian ? "Шрифт изменится после полного перезапуска приложения." : "The font will change after the app is fully restarted.", actions: [TextAlertAction(type: .defaultAction, title: presentationData.strings.Common_OK, action: {})]), nil)
++            }))
++        }
++        actionSheet.setItemGroups([ActionSheetItemGroup(items: items), ActionSheetItemGroup(items: [
++            ActionSheetButtonItem(title: presentationData.strings.Common_Cancel, color: .accent, font: .bold, action: { [weak actionSheet] in
++                actionSheet?.dismissAnimated()
++            })
++        ])])
++        presentControllerImpl?(actionSheet, nil)
+     }, openBubbleSettings: {
+         let _ = (context.sharedContext.accountManager.sharedData(keys: Set([ApplicationSpecificSharedDataKeys.presentationThemeSettings]))
+         |> take(1)
+diff --git a/submodules/TabBarUI/Sources/TabBarContollerNode.swift b/submodules/TabBarUI/Sources/TabBarContollerNode.swift
+index 2b833df..fa9584e 100644
+--- a/submodules/TabBarUI/Sources/TabBarContollerNode.swift
++++ b/submodules/TabBarUI/Sources/TabBarContollerNode.swift
+@@ -62,6 +62,14 @@ final class TabBarControllerNode: ASDisplayNode {
+     
+     private let tabBarView = ComponentView<Empty>()
+     
++    deinit {
++        // In the desktop-style layout the bar can be hosted by an ancestor view; do not leave it behind.
++        let tabBarComponentView = self.tabBarView.view
++        DispatchQueue.main.async {
++            tabBarComponentView?.removeFromSuperview()
++        }
++    }
++    
+     private let disabledOverlayNode: ASDisplayNode
+     private var toolbar: ComponentView<Empty>?
+     private let toolbarActionSelected: (ToolbarActionOption) -> Void
+@@ -328,20 +336,35 @@ final class TabBarControllerNode: ASDisplayNode {
+         )
+         let tabBarFrame: CGRect
+         if let sidePlacement {
+-            tabBarFrame = self.tabBarHidden ? sidePlacement.hiddenFrame(containerWidth: params.layout.size.width) : sidePlacement.frame
++            tabBarFrame = self.tabBarHidden ? sidePlacement.hiddenFrame(containerWidth: params.layout.metrics.windowSize?.width ?? params.layout.size.width) : sidePlacement.frame
+         } else {
+             tabBarFrame = CGRect(origin: CGPoint(x: floor((params.layout.size.width - tabBarSize.width) * 0.5), y: params.layout.size.height - (self.tabBarHidden ? 0.0 : (tabBarSize.height + tabBarBottomInset))), size: tabBarSize)
+         }
+         
+         if let tabBarComponentView = self.tabBarView.view {
+-            if tabBarComponentView.superview == nil {
+-                self.view.addSubview(tabBarComponentView)
++            // Desktop-style layout: the vertical bar lies right of the master pane, so an ancestor that spans the whole
++            // window hosts it (above the chat pane); otherwise it is a subview of this node as usual.
++            var hostView: UIView = self.view
++            if let sidePlacement, sidePlacement.frame.maxX > params.layout.size.width + 0.5, let windowWidth = params.layout.metrics.windowSize?.width {
++                var current: UIView? = self.view.superview
++                while let candidate = current {
++                    if candidate.bounds.width >= windowWidth - 1.0 {
++                        hostView = candidate
++                        break
++                    }
++                    current = candidate.superview
++                }
++            }
++            if tabBarComponentView.superview !== hostView {
++                hostView.addSubview(tabBarComponentView)
++            } else if hostView !== self.view {
++                hostView.bringSubviewToFront(tabBarComponentView)
+             }
+             let tabBarAlpha: CGFloat = params.toolbar == nil ? 1.0 : 0.0
+             if let crossfadeDuration, let previousAppliedPlacement, let previousPlacement = previousAppliedPlacement.placement {
+                 if !previousAppliedPlacement.isHidden && tabBarComponentView.alpha > 0.0, let snapshotView = tabBarComponentView.snapshotView(afterScreenUpdates: false) {
+                     snapshotView.frame = previousPlacement.movedFrame(from: previousAppliedPlacement.containerSize, to: params.layout.size)
+-                    self.view.insertSubview(snapshotView, aboveSubview: tabBarComponentView)
++                    tabBarComponentView.superview?.insertSubview(snapshotView, aboveSubview: tabBarComponentView)
+                     snapshotView.layer.animateAlpha(from: 1.0, to: 0.0, duration: crossfadeDuration * 0.5, removeOnCompletion: false, completion: { [weak snapshotView] _ in
+                         snapshotView?.removeFromSuperview()
+                     })
+diff --git a/submodules/TelegramUI/Components/Chat/ChatInputTextNode/Sources/ChatInputTextNode.swift b/submodules/TelegramUI/Components/Chat/ChatInputTextNode/Sources/ChatInputTextNode.swift
+index aa3b156..0527410 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatInputTextNode/Sources/ChatInputTextNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatInputTextNode/Sources/ChatInputTextNode.swift
+@@ -1173,6 +1173,16 @@ public final class ChatInputTextView: ChatInputTextViewImpl, UITextViewDelegate,
+     
+     private var selectionChangedForEditedText: Bool = false
+     
++    /// Desktop-style layout on iPhone: the keyboard is drawn inside the chat pane, the system keyboard is suppressed.
++    override public var inputView: UIView? {
++        get {
++            return InAppKeyboardManager.shared.inputViewOverride(for: self) ?? super.inputView
++        }
++        set {
++            super.inputView = newValue
++        }
++    }
++    
+     override public var textInputMode: UITextInputMode? {
+         if !self.didInitializePrimaryInputLanguage {
+             self.didInitializePrimaryInputLanguage = true
+diff --git a/submodules/TelegramUI/Components/PeerInfo/PeerInfoPaneNode/Sources/PeerInfoSideInsets.swift b/submodules/TelegramUI/Components/PeerInfo/PeerInfoPaneNode/Sources/PeerInfoSideInsets.swift
+index 735080d..1f180f4 100644
+--- a/submodules/TelegramUI/Components/PeerInfo/PeerInfoPaneNode/Sources/PeerInfoSideInsets.swift
++++ b/submodules/TelegramUI/Components/PeerInfo/PeerInfoPaneNode/Sources/PeerInfoSideInsets.swift
+@@ -38,14 +38,18 @@ public func peerInfoSideInsets(layout: ContainerViewLayout) -> PeerInfoSideInset
+     let stripLeft: CGFloat = layout.sideStrip(edge: .left) != nil ? layout.safeInsets.left : 0.0
+     let stripRight: CGFloat = layout.sideStrip(edge: .right) != nil ? layout.safeInsets.right : 0.0
+     let hasStrip = stripLeft > 0.0 || stripRight > 0.0
++    // A pane next to the screen edge in landscape (desktop-style layout on iPhone): keep the sections clear of the
++    // notch / Dynamic Island, which the safe inset describes.
++    let notchLeft: CGFloat = layout.safeInsets.left > 0.0 ? layout.safeInsets.left + 8.0 : 0.0
++    let notchRight: CGFloat = layout.safeInsets.right > 0.0 ? layout.safeInsets.right + 8.0 : 0.0
+     return PeerInfoSideInsets(
+         base: base,
+         stripLeft: stripLeft,
+         stripRight: stripRight,
+         navigationLeft: layout.safeInsets.left,
+         navigationRight: layout.safeInsets.right,
+-        sectionLeft: stripLeft > 0.0 ? max(base, stripLeft + 16.0) : base,
+-        sectionRight: stripRight > 0.0 ? max(base, stripRight + 16.0) : base,
++        sectionLeft: stripLeft > 0.0 ? max(base, stripLeft + 16.0) : max(base, notchLeft),
++        sectionRight: stripRight > 0.0 ? max(base, stripRight + 16.0) : max(base, notchRight),
+         paneSideInset: hasStrip ? 0.0 : layout.safeInsets.left
+     )
+ }
+diff --git a/submodules/TelegramUI/Components/TabBarLayout/Sources/TabBarSidePlacement.swift b/submodules/TelegramUI/Components/TabBarLayout/Sources/TabBarSidePlacement.swift
+index e21be3c..e997831 100644
+--- a/submodules/TelegramUI/Components/TabBarLayout/Sources/TabBarSidePlacement.swift
++++ b/submodules/TelegramUI/Components/TabBarLayout/Sources/TabBarSidePlacement.swift
+@@ -42,6 +42,15 @@ public func tabBarSidePlacement(layout: ContainerViewLayout, itemCount: Int) ->
+     if itemCount <= 0 {
+         return nil
+     }
++    // Desktop-style layout (iPhone in landscape, wide split layout): a vertical bar at the right screen edge,
++    // behind the chat. The frame is in the window's coordinates, i.e. it lies outside the master pane the
++    // tab bar controller lives in, so the tab bar view is hosted by an ancestor view (see TabBarControllerNode).
++    if UIDevice.current.userInterfaceIdiom == .phone, case .regular = layout.metrics.widthClass, let windowSize = layout.metrics.windowSize {
++        let size = CGSize(width: tabBarCompactItemThickness + tabBarInnerInset * 2.0, height: CGFloat(itemCount) * tabBarItemLength + tabBarInnerInset * 2.0)
++        let x = windowSize.width - 6.0 - size.width
++        let y = max(8.0, floor((layout.size.height - size.height) / 2.0))
++        return TabBarSidePlacement(edge: .right, frame: CGRect(x: x, y: y, width: size.width, height: size.height))
++    }
+     let edge: ContainerViewLayoutSideEdge
+     let strip: CGRect
+     if let rightStrip = layout.sideStrip(edge: .right) {
+diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
+index 1ceb46b..123a6d1 100644
+--- a/submodules/TelegramUI/Sources/AppDelegate.swift
++++ b/submodules/TelegramUI/Sources/AppDelegate.swift
+@@ -573,7 +573,16 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+         try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
+             BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
+         })
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        var maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        if maybeAppGroupUrl == nil {
++            // Sideloaded builds are often signed without the App Groups entitlement. Instead of stopping on a black screen,
++            // keep the data in the app's own sandbox (the share/widget extensions will not see it).
++            if let supportUrl = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
++                let fallbackUrl = supportUrl.appendingPathComponent("telegram-app-group-fallback", isDirectory: true)
++                try? FileManager.default.createDirectory(at: fallbackUrl, withIntermediateDirectories: true, attributes: nil)
++                maybeAppGroupUrl = fallbackUrl
++            }
++        }
+         
+         let buildConfig = BuildConfig(baseAppBundleId: baseAppBundleId)
+         self.buildConfig = buildConfig
