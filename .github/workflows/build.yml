@@ -32,7 +32,7 @@ jobs:
           test -f telegram-ios/submodules/ChatListUI/Sources/ChatListFolderRailView.swift
           test -f telegram-ios/submodules/Display/Source/InAppKeyboard.swift
           # Keep the build within the 3 vCPU / 7 GB standard runner.
-          printf '\nbuild --jobs=2\nbuild --local_ram_resources=4096\n' >> telegram-ios/.bazelrc
+          printf '\nbuild --jobs=2\n' >> telegram-ios/.bazelrc
 
       - name: Show toolchain
         run: |
