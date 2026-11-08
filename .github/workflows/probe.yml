@@ -1,0 +1,19 @@
+name: probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: macos-27
+    timeout-minutes: 10
+    steps:
+      - name: System information
+        run: |
+          set -x
+          sw_vers
+          xcodebuild -version
+          xcode-select -p
+          df -h /
+          sysctl -n hw.ncpu
+          sysctl -n hw.memsize
