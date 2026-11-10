@@ -25,12 +25,23 @@ def run(args, check=True):
 
 
 def signing_identity():
-    result = run(["security", "find-identity", "-v", "-p", "codesigning", KEYCHAIN])
-    output = result.stdout.decode("utf-8", "replace")
-    for line in output.splitlines():
-        if '"' in line:
-            return line.split('"')[1]
-    raise SystemExit("No codesigning identity found in {}:\n{}".format(KEYCHAIN, output))
+    # `security find-identity -v` only lists trusted identities, while our fake
+    # certificate is self-signed.  Extract the common name straight from the p12
+    # instead (the same way build-system/Make/GenerateProfiles.py does).
+    p12_path = "build-system/fake-codesigning/certs/SelfSigned.p12"
+    certificate_pem = run(
+        ["openssl", "pkcs12", "-in", p12_path, "-passin", "pass:", "-nokeys", "-legacy"]
+    ).stdout
+    subject = subprocess.run(
+        ["openssl", "x509", "-noout", "-subject", "-nameopt", "oneline,-esc_msb"],
+        input=certificate_pem,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout.decode("utf-8", "replace").strip()
+    if "CN = " in subject:
+        return subject.split("CN = ")[-1].split(",")[0].strip()
+    raise SystemExit("Could not extract the signing identity from {}: {}".format(p12_path, subject))
 
 
 def renew_profile(path, identity):
