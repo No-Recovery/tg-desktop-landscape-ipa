@@ -17,19 +17,23 @@ final class TabBarControllerNode: ASDisplayNode {
         let currentControllerSearchState: ViewController.TabBarSearchState?
         /// The side placement depends on it, and with it the bottom inset the tab gets.
         let itemCount: Int
+        /// The desktop-style tab bar placement chosen in Settings.
+        let placementKey: String
         
         init(
             layout: ContainerViewLayout,
             toolbar: Toolbar?,
             isTabBarHidden: Bool,
             currentControllerSearchState: ViewController.TabBarSearchState?,
-            itemCount: Int
+            itemCount: Int,
+            placementKey: String
         ) {
             self.layout = layout
             self.toolbar = toolbar
             self.isTabBarHidden = isTabBarHidden
             self.currentControllerSearchState = currentControllerSearchState
             self.itemCount = itemCount
+            self.placementKey = placementKey
         }
     }
     
@@ -199,7 +203,7 @@ final class TabBarControllerNode: ASDisplayNode {
     
     /// The bottom inset the current tab gets, or nil to leave the tab's own.
     func containerLayoutUpdated(_ layout: ContainerViewLayout, toolbar: Toolbar?, transition: ContainedViewLayoutTransition) -> CGFloat? {
-        let params = Params(layout: layout, toolbar: toolbar, isTabBarHidden: self.tabBarHidden, currentControllerSearchState: self.currentController?.tabBarSearchState, itemCount: self.tabBarItems.count)
+        let params = Params(layout: layout, toolbar: toolbar, isTabBarHidden: self.tabBarHidden, currentControllerSearchState: self.currentController?.tabBarSearchState, itemCount: self.tabBarItems.count, placementKey: DesktopLayoutPreferences.tabBarPlacement.rawValue)
         if let layoutResult = self.layoutResult, layoutResult.params == params {
             return layoutResult.bottomInset
         } else {
@@ -238,6 +242,11 @@ final class TabBarControllerNode: ASDisplayNode {
         }
         
         let sidePlacement = self.sidePlacement(for: params.layout)
+        // Desktop-style layout with the bar at the bottom: keep it clear of the folder column on the left.
+        var railReserved: CGFloat = 0.0
+        if sidePlacement == nil, UIDevice.current.userInterfaceIdiom == .phone, case .regular = params.layout.metrics.widthClass {
+            railReserved = params.layout.safeInsets.left + 64.0
+        }
         let previousAppliedPlacement = self.tabBarView.view == nil ? nil : self.appliedPlacement
         let appliedPlacement = TabBarAppliedPlacement(placement: sidePlacement, containerSize: params.layout.size, isHidden: self.tabBarHidden)
         self.appliedPlacement = appliedPlacement
@@ -332,13 +341,13 @@ final class TabBarControllerNode: ASDisplayNode {
                 isCompact: tabBarIsCompact(layout: params.layout, sidePlacement: sidePlacement)
             )),
             environment: {},
-            containerSize: sidePlacement?.frame.size ?? CGSize(width: params.layout.size.width - sideInset * 2.0, height: 100.0)
+            containerSize: sidePlacement?.frame.size ?? CGSize(width: params.layout.size.width - railReserved - sideInset * 2.0, height: 100.0)
         )
         let tabBarFrame: CGRect
         if let sidePlacement {
             tabBarFrame = self.tabBarHidden ? sidePlacement.hiddenFrame(containerWidth: params.layout.metrics.windowSize?.width ?? params.layout.size.width) : sidePlacement.frame
         } else {
-            tabBarFrame = CGRect(origin: CGPoint(x: floor((params.layout.size.width - tabBarSize.width) * 0.5), y: params.layout.size.height - (self.tabBarHidden ? 0.0 : (tabBarSize.height + tabBarBottomInset))), size: tabBarSize)
+            tabBarFrame = CGRect(origin: CGPoint(x: railReserved + floor((params.layout.size.width - railReserved - tabBarSize.width) * 0.5), y: params.layout.size.height - (self.tabBarHidden ? 0.0 : (tabBarSize.height + tabBarBottomInset))), size: tabBarSize)
         }
         
         if let tabBarComponentView = self.tabBarView.view {

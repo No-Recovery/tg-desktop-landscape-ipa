@@ -387,6 +387,7 @@ public class Window1 {
     private var keyboardWillHideObserver: AnyObject?
     private var keyboardTypeChangeObserver: AnyObject?
     private var voiceOverStatusObserver: AnyObject?
+    private var desktopLayoutPreferencesObserver: AnyObject?
     
     private var windowLayout: WindowLayout
     private var updatingLayout: UpdatingLayout?
@@ -844,6 +845,10 @@ public class Window1 {
             })
         }
         
+        self.desktopLayoutPreferencesObserver = NotificationCenter.default.addObserver(forName: DesktopLayoutPreferences.didChangeNotification, object: nil, queue: OperationQueue.main, using: { [weak self] _ in
+            self?.invalidateSupportedOrientations()
+        })
+        
         let recognizer = WindowPanRecognizer(target: self, action: #selector(self.panGesture(_:)))
         recognizer.cancelsTouchesInView = false
         recognizer.delaysTouchesBegan = false
@@ -886,6 +891,9 @@ public class Window1 {
         }
         if let voiceOverStatusObserver = self.voiceOverStatusObserver {
             NotificationCenter.default.removeObserver(voiceOverStatusObserver)
+        }
+        if let desktopLayoutPreferencesObserver = self.desktopLayoutPreferencesObserver {
+            NotificationCenter.default.removeObserver(desktopLayoutPreferencesObserver)
         }
     }
     
@@ -1138,8 +1146,15 @@ public class Window1 {
                             resolvedOrientations = supportedOrientations.compactSize
                         }
                         if UIDevice.current.userInterfaceIdiom == .phone {
-                            // Desktop-style layout: the iPhone app always runs in landscape.
-                            resolvedOrientations = .landscape
+                            // Desktop-style layout: the orientation comes from Settings > Layout.
+                            switch DesktopLayoutPreferences.orientationMode {
+                            case .landscape:
+                                resolvedOrientations = .landscape
+                            case .portrait:
+                                resolvedOrientations = .portrait
+                            case .auto:
+                                break
+                            }
                         }
                         if resolvedOrientations.isEmpty {
                             resolvedOrientations = [.portrait]
@@ -1290,8 +1305,15 @@ public class Window1 {
                     resolvedOrientations = supportedOrientations.compactSize
             }
             if UIDevice.current.userInterfaceIdiom == .phone {
-                // Desktop-style layout: the iPhone app always runs in landscape.
-                resolvedOrientations = .landscape
+                // Desktop-style layout: the orientation comes from Settings > Layout.
+                switch DesktopLayoutPreferences.orientationMode {
+                case .landscape:
+                    resolvedOrientations = .landscape
+                case .portrait:
+                    resolvedOrientations = .portrait
+                case .auto:
+                    break
+                }
             }
             if resolvedOrientations.isEmpty {
                 resolvedOrientations = [.portrait]
@@ -1333,8 +1355,15 @@ public class Window1 {
                         resolvedOrientations = supportedOrientations.compactSize
                 }
                 if UIDevice.current.userInterfaceIdiom == .phone {
-                    // Desktop-style layout: the iPhone app always runs in landscape.
-                    resolvedOrientations = .landscape
+                    // Desktop-style layout: the orientation comes from Settings > Layout.
+                    switch DesktopLayoutPreferences.orientationMode {
+                    case .landscape:
+                        resolvedOrientations = .landscape
+                    case .portrait:
+                        resolvedOrientations = .portrait
+                    case .auto:
+                        break
+                    }
                 }
                 if resolvedOrientations.isEmpty {
                     resolvedOrientations = [.portrait]

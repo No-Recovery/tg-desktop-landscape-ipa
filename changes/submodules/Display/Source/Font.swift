@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import CoreText
 
 public struct Font {
     public enum Design {
@@ -165,8 +166,35 @@ public struct Font {
         guard let value = UserDefaults.standard.string(forKey: Font.customFontFamilyDefaultsKey), !value.isEmpty else {
             return nil
         }
+        Font.registerImportedFonts()
         return value
     }()
+    
+    /// Fonts the user added in Settings > Fonts: a list of ["file": name in the fonts directory, "family": family name].
+    public static let importedFontsDefaultsKey = "importedFonts"
+    
+    public static func importedFontsDirectory() -> URL? {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let url = base.appendingPathComponent("ImportedFonts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: nil)
+        return url
+    }
+    
+    /// Registers the user's fonts for this process, so they can be used by their family name.
+    public static func registerImportedFonts() {
+        guard let directory = Font.importedFontsDirectory(), let items = UserDefaults.standard.array(forKey: Font.importedFontsDefaultsKey) as? [[String: String]] else {
+            return
+        }
+        for item in items {
+            if let file = item["file"] {
+                let url = directory.appendingPathComponent(file)
+                // Registering an already registered font just fails, which is fine.
+                let _ = CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+            }
+        }
+    }
     
     private static func customFont(size: CGFloat, weight: UIFont.Weight, italic: Bool) -> UIFont? {
         guard let family = Font.customFontFamily else {

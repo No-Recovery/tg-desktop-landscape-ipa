@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'changes/**'
+      - 'scripts/**'
       - '.github/workflows/build.yml'
 
 jobs:
@@ -43,6 +44,14 @@ jobs:
           sysctl -n hw.ncpu
           sysctl -n hw.memsize
 
+      - name: Prepare fake codesigning
+        working-directory: telegram-ios
+        run: |
+          set -eux
+          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
+          python3 "$GITHUB_WORKSPACE/scripts/renew_profiles.py"
+          security cms -D -i build-system/fake-codesigning/profiles/Telegram.mobileprovision | grep -A1 ExpirationDate
+
       - name: Build IPA
         working-directory: telegram-ios
         env:
@@ -50,7 +59,6 @@ jobs:
         run: |
           set -eux
           mkdir -p build/artifacts
-          python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
           python3 -u build-system/Make/Make.py \
             --bazelUserRoot="$RUNNER_TEMP/bazel-root" \
             build \

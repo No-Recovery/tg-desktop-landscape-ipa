@@ -45,7 +45,7 @@ public func tabBarSidePlacement(layout: ContainerViewLayout, itemCount: Int) -> 
     // Desktop-style layout (iPhone in landscape, wide split layout): a vertical bar at the right screen edge,
     // behind the chat. The frame is in the window's coordinates, i.e. it lies outside the master pane the
     // tab bar controller lives in, so the tab bar view is hosted by an ancestor view (see TabBarControllerNode).
-    if UIDevice.current.userInterfaceIdiom == .phone, case .regular = layout.metrics.widthClass, let windowSize = layout.metrics.windowSize {
+    if UIDevice.current.userInterfaceIdiom == .phone, case .regular = layout.metrics.widthClass, DesktopLayoutPreferences.tabBarPlacement == .right, let windowSize = layout.metrics.windowSize {
         let size = CGSize(width: tabBarCompactItemThickness + tabBarInnerInset * 2.0, height: CGFloat(itemCount) * tabBarItemLength + tabBarInnerInset * 2.0)
         let x = windowSize.width - 6.0 - size.width
         let y = max(8.0, floor((layout.size.height - size.height) / 2.0))
