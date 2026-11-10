@@ -72,9 +72,7 @@ jobs:
         working-directory: telegram-ios
         run: |
           set -eux
-          IPA=$(find bazel-out -type f -name 'Telegram.ipa' | head -n 1)
-          test -n "$IPA"
-          cp "$IPA" build/artifacts/Telegram.ipa
+          test -f build/artifacts/Telegram.ipa
           ls -lh build/artifacts/Telegram.ipa
           shasum -a 256 build/artifacts/Telegram.ipa
           unzip -l build/artifacts/Telegram.ipa | head -n 20
